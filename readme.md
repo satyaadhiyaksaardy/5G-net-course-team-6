@@ -1,201 +1,175 @@
-# 5G Healthcare Simulation with OpenAirInterface (OAI) in a Virtualized Environment
+# 5G Healthcare Simulation with OAI RF Simulator
+This guide provides a comprehensive walkthrough to deploy, simulate, and evaluate a fully virtualized 5G Standalone (SA) network using the OpenAirInterface (OAI) RF simulator. It’s tailored for a healthcare IoT scenario where wearable sensors (UEs) send real‑time patient data over a 5G network to a backend server—all in Docker containers.
 
-## Project Overview
+## 1. Project Overview
 
-This project demonstrates a full end-to-end 5G standalone (SA) network using the OpenAirInterface (OAI) 5G stack in a virtualized environment, tailored for a healthcare IoT scenario. For example, wearable health sensors (5G UEs) transmit patient data to a cloud-based health monitoring application over a 5G network. The setup includes:
+- **Objective**: Showcase end-to-end 5G SA connectivity in a healthcare context, focusing on ultra‑low latency and reliability for wearable IoT devices.
+- **Components**:
+   - RF Simulator: Virtual radio link—no SDR hardware required.
+   - gNB: OAI 5G base station container.
+   - CN5G: Core Network containers (MySQL, AMF, SMF, UPF).
+   - UE: Three nrUE containers simulating wearable devices.
+   - DN: External Data Network container running the healthcare application server.
 
-- **OAI 5G Core (CN5G)**
-- **OAI gNB (5G base station)**
-- **OAI nrUE (5G user equipment)**
+Below is the logical topology and IP addressing for our Docker-based RF simulator deployment:
+![oai stack](/images/oai-stack.png)
+- Private Subnet (192.168.71.128/26): Hosts UE, gNB, AMF, SMF, UPF—isolated traffic between RAN and Core.
+- Public Subnet (192.168.72.128/26): Hosts NRF and ext-dn, with ext-dn providing connectivity to the “internet” (SGI).
+- SGI Route: On ext-dn host, a route to UE data network 12.1.1.0/24 is added via the Core (192.168.72.134 interface).
+- IP Assignment: Default compose file provides static IPs per container as shown above.
 
-By following this guide, you'll create a virtual testbed showcasing how 5G enables new healthcare possibilities and supports smart medical devices. The README is organized into: prerequisites, environment setup, configuration, deployment, network testing, and healthcare data flow simulation.
-
-## System Architecture
-
+## 2. Test Scenario
+We emulate three wearable sensors (e.g., heart‑rate monitors) connecting over 5G:
 ```
-[ Wearable UE ] <--RF--> [ gNB (RAN) ] <--IP--> [ 5G Core (AMF, SMF, UPF) ] <--IP--> [ Healthcare App Server ]
+[ UE #1, #2, #3 ] <--(RF Simulator)--> [ OAI gNB ] <--(NGAP/SCTP)--> [ CN5G ] <--(GTP‑U)--> [ Healthcare App Server ]
 ```
-- **UE**: Virtualized nrUE process simulating wearable sensors.
-- **gNB**: OAI softmodem providing simulated RF and NG interfaces.
-- **Core**: Dockerized CN5G containers (AMF, SMF, UPF, NRF, AUSF).
+All components run as Docker containers on a single host using OAI’s RF simulator for the radio interface.
+- **UE**: Dockerized nrUE process simulating wearable sensors.
+- **gNB**: Dockerized OAI softmodem providing simulated RF and NG interfaces.
+- **Core**: Dockerized CN5G containers (AMF, SMF, UPF).
 - **Server**: Health monitoring service receiving sensor data over the 5G data network.
 
-## Prerequisites
+## 3. Goals
+**1. Latency:** Measure end-to-end round‑trip latency; target < 20 ms for reliable real‑time monitoring.
+**2. Connectivity:** Verify UE registration, PDU session establishment, and stable packet exchange.
+**3. Throughput & Reliability:** Use iperf3 to validate throughput and jitter under a realistic UDP load.
 
-- **Hardware Resources**: A machine or cloud instance capable of multiple VMs/containers. Recommended: two or three Ubuntu 24.04 LTS VMs with:
-  - Combined Core/gNB host: ≥8-core x86\_64 CPU (3.5 GHz+), 32 GB RAM
-  - UE host: \~8 GB RAM
-  - (Optional) SDR hardware requires appropriate slots/ports
-- **Operating System**: Ubuntu 24.04 LTS 64‑bit
-- **Virtualization Platform**: VirtualBox, VMware, KVM, or Docker. Ensure bridged or internal networking between VMs.
-- **Networking**: Network interface for gNB→Core. For RF simulation, no public spectrum needed. For SDR, install UHD drivers and attach device to gNB host.
-- **Software & Tools**: `git`, `build-essential`, `docker`, `docker-compose` (Compose V2 plugin), `wireshark` (for latency tests), internet access.
+## 4. Prerequisites
+**- Software:** Git, Docker Engine, Docker Compose V2, wireshark/tshark, iperf3, netcat
+**- Network:** Docker bridge (default) or host networking for cross-container setups
 
-> **Note:** This guide assumes a fully virtualized radio environment using OAI’s RF simulator (no physical hardware). For SDR use (e.g., USRP B210/N300), meet additional prerequisites (UHD drivers, device access).
+## 5. Environment Setup
 
-## Environment Setup
+### 5.1. Install Docker & Compose
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git curl net-tools
+sudo usermod -aG docker $USER && newgrp docker
+```
 
-### A. Setting up the OAI 5G Core (CN5G)
+### 5.2. Clone OAI Repository
+```bash
+git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git ~/openairinterface5g
+cd ~/openairinterface5g
+```
 
-On the Core VM (Ubuntu 24.04):
+### 5.3. Pull Prebuilt Images
+```bash
+docker pull mysql:8.0
+docker pull oaisoftwarealliance/oai-amf:v2.1.9
+docker pull oaisoftwarealliance/oai-smf:v2.1.9
+docker pull oaisoftwarealliance/oai-upf:v2.1.9
+docker pull oaisoftwarealliance/trf-gen-cn5g:focal
+```
 
-1. **Install Docker & dependencies**
+### D. Build Our Own gNB and nrUE Image
+```bash
+docker build --target ran-base --tag ran-base:latest --file docker/Dockerfile.base.ubuntu22 .
+docker build --target ran-build --tag ran-build:latest --file docker/Dockerfile.build.ubuntu22 .
 
+docker build --target oai-enb --tag oai-enb:latest --file docker/Dockerfile.eNB.ubuntu22 .
+docker build --target oai-nr-ue --tag oai-nr-ue:latest --file docker/Dockerfile.nrUE.ubuntu22 .
+```
+
+## 6. Deployment
+> **Note:** Launch services in sequence; wait for each to be healthy before proceeding.
+
+### 6.1. Core Network
+```bash
+cd ~/openairinterface5g/ci-scripts/yaml_files/5g_rfsimulator
+docker-compose up -d mysql oai-amf oai-smf oai-upf oai-ext-dn
+```
+Use `docker compose ps` to verify.
+
+### 6.2. gNB (RAN)
+```bash
+docker compose up -d oai-gnb
+```
+Check `docker logs -f oai-amf --follow` for a successful NGAP connection from the gNB.
+
+### 6.3. UEs (Wearable Devices)
+On another terminal:
+```bash
+docker compose up -d oai-nr-ue oai-nr-ue2 oai-nr-ue3
+```
+Monitor AMF logs for each UE’s registration procedure.
+
+### 6.4. Verification
+```bash
+# From UE container:
+docker exec -it rfsim5g-oai-nr-ue ping -I oaitun_ue1 192.168.72.135
+```
+A successful ping confirms data-plane connectivity.
+
+## 7. Healthcare Data Flow Simulation
+7.1. **Simulate Sensor Data (UE ➡️ Server)**
    ```bash
-   sudo apt update
-   sudo apt install -y git net-tools curl ca-certificates
-   # Install Docker Engine & Compose plugin
-   sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-   # Add user to docker group, then reboot
-   sudo usermod -aG docker $USER && sudo reboot
+   docker exec -it rfsim5g-oai-nr-ue bash -c \
+  "while true; do echo \"HR:$((60 + RANDOM % 40))\" | nc -u 192.168.72.135 5000; sleep 5; done"
    ```
-
-2. **Obtain OAI CN5G configuration**
-
+   `192.168.72.135` is the ext-dn container’s IP.
+7.2. **Receive Data (Server)**
    ```bash
-   wget -O ~/oai-cn5g.zip "https://gitlab.eurecom.fr/oai/openairinterface5g/-/archive/develop/openairinterface5g-develop.zip?path=doc/tutorial_resources/oai-cn5g"
-   unzip ~/oai-cn5g.zip -d ~/
-   mv ~/openairinterface5g-develop-doc-tutorial_resources-oai-cn5g/doc/tutorial_resources/oai-cn5g ~/oai-cn5g
-   rm -rf ~/openairinterface5g-develop-doc-tutorial_resources-oai-cn5g ~/oai-cn5g.zip
+   docker exec -it rfsim5g-oai-ext-dn nc -u -l 5000
    ```
+7.3. **Scale UEs:** Add more oai-nr-ue-X services in the compose file and matching IMSI entries in the Core's database.
 
-3. **Pull OAI core Docker images**
+## 8. Testing Methodology
+To evaluate uplink performance (UE → Server), we focus on packet capture for latency analysis and iperf3 UDP tests for throughput and jitter.
 
-   ```bash
-   cd ~/oai-cn5g
-   docker compose pull
-   ```
+### 8.1 Packet Capture (Wireshark/tshark)
+Capture GTP‑U and SCTP traffic on the UE tunnel interface to measure packet-level latency:
+```bash
+# On the host, identify the UE container's network interface (oaitun_ue1)
+tshark -i oaitun_ue1 -f "udp port 2152 or sctp port 38412" -w latency_uplink.pcap
+```
+Analyze the resulting pcap in Wireshark to timestamp UDP data packets and their responses, deriving uplink RTT.
 
-4. **(Optional) Verify & adjust configs**
+### 8.2 Uplink Throughput & Jitter (iperf3)
+Simulate a wearable sensor pushing UDP traffic to the backend (ext-dn at 192.168.72.135):
+1. Start the iperf3 server inside the ext-dn container
+```bash
+docker exec -it rfsim5g-oai-ext-dn iperf3 -s -p 5201
+```
+2. Run the iperf3 client inside an nrUE container
+```bash
+docker exec -it rfsim5g-oai-nr-ue iperf3 -c 192.168.72.135 -u -b 1M -t 20 -p 5201
+```
 
-   - Check `amf_config.yaml`, `smf_config.yaml`, etc. for PLMN (MCC/MNC), IPs, subscriber definitions.
-   - Ensure Core VM IP (e.g., 192.168.1.100) is reachable by gNB.
+## 9. Latency Measurement and Results
+Using the above methods, we can analyze the network's latency performance. Below are the outcome of these tests: 
+| Metric | Value (ms) |
+| -------- | ------- |
+Total Data Sent | 2.38 MB |
+Bandwidth | 998 Kbits/sec |
+Average Jitter | 0.617 ms |
+Packet Loss | 0/1 727 (0 %) |
 
-### B. Setting up the OAI gNB and nrUE (RAN)
+![Server Side](images/iperf3-server-side.png)
+_Server-side iperf3 report showing jitter and packet counts._
 
-On the RAN VM (Ubuntu 24.04):
+![Client Side](images/iperf3-client-side.png)
+_Client-side iperf3 output showing throughput over each interval._
+**Analysis**: Throughput is close to the offered load (1 Mbps), with negligible packet loss and sub-millisecond jitter, demonstrating stable uplink performance for a wearable IoT sensor.
 
-1. **Install build dependencies (and UHD for SDR)**
+<!-- ### 9.1 Control-plane Latency (ICMP Ping) Control-plane Latency (ICMP Ping)
+We measure ICMP RTT from an nrUE container to the external data network over the 5G control-plane tunnel:
+```bash
+# From inside an UE container:
+ping -I oaitun_ue1 -c 10 192.168.72.135
+# Example summary after removing initial attach delay:
+rtt min/avg/max/mdev = 4.350/5.100/6.050/0.650 ms
+```
+![Server Side](images/ping.png)
+Ping output after initial registration—values reflect subsequent RTT once the PDU session is established.
+Analysis: After the first packet incurs registration and ARP overhead, the following control-plane RTTs stabilize around 5 ms, well within the < 10 ms target of 5G for ultra-reliable, low-latency applications. -->
 
-   ```bash
-   sudo apt update
-   sudo apt install -y autoconf automake build-essential cmake ccache cpufrequtils \
-      git libboost-all-dev libncurses-dev libusb-1.0-0-dev python3-dev python3-pip \
-      python3-mako libforms-dev libforms-bin wireshark
-   # For UHD:
-   sudo apt install -y uhd-host && sudo uhd_images_downloader
-   ```
+## 10. Cleanup
+```bash
+docker compose down
+```
+Removes containers, networks, and volumes created by Docker Compose.
 
-2. **Clone OAI 5G RAN code**
-
-   ```bash
-   git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git ~/openairinterface5g
-   cd ~/openairinterface5g
-   git checkout develop
-   ```
-
-3. **Install OAI dependencies**
-
-   ```bash
-   cd ~/openairinterface5g/cmake_targets
-   ./build_oai -I
-   ```
-
-4. **Build gNB & nrUE**
-
-   ```bash
-   ./build_oai -w USRP --ninja --gNB --nrUE --build-lib "nrscope" -C
-   ```
-
-5. **Resource tuning (optional)**
-
-   - CPU performance mode, disable hyper-threading, increase network buffers, CPU pinning.
-
-## Configuration
-
-### 1. OAI 5G Core Configuration
-
-- **PLMN & Tracking Area**: Match `mcc`/`mnc` in AMF config with gNB.
-- **AMF Addressing**: Set gNB’s `ngap_ip_address` to Core VM IP.
-- **Subscribers**: Verify default IMSI (001010000000001) and keys in `amf_config.yaml` or subscriber DB.
-- **Data Network (DN)**: Confirm IP pool (e.g., 192.168.70.0/24) and routing to application servers.
-
-### 2. OAI gNB Configuration
-
-- Use `gnb.sa.band78.fr1.106PRB.usrpb210.conf` (band 78, 106 PRB).
-- Ensure PLMN, SST (slice) match core.
-- Update AMF IP in config if needed.
-
-### 3. OAI nrUE Configuration
-
-- **SIM Credentials**:
-  ```ini
-  uicc0 = {
-    imsi = "001010000000001";
-    key  = "fec86ba6eb707ed08905757b1bb44b8f";
-    opc  = "C42449363BBAD02B66D16BC975D77CC1";
-    dnn  = "oai";
-    nssai_sst = 1;
-  };
-  ```
-- **Radio Settings**: Match band/numerology/PRB with gNB via CLI flags.
-- **UE Networking**: UE creates `oaitun_ue1` interface automatically.
-
-## Deployment
-
-1. **Launch 5G Core**
-
-   ```bash
-   cd ~/oai-cn5g
-   docker compose up -d
-   ```
-
-2. **Start gNB** (RF simulator)
-
-   ```bash
-   cd ~/openairinterface5g/cmake_targets/ran_build/build
-   sudo ./nr-softmodem \
-     -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf \
-     --gNBs.[0].min_rxtxtime 6 --rfsim
-   ```
-
-3. **Start nrUE** (RF simulator)
-
-   ```bash
-   cd ~/openairinterface5g/cmake_targets/ran_build/build
-   sudo ./nr-uesoftmodem \
-     -r 106 --numerology 1 --band 78 -C 3619200000 \
-     --ue-fo-compensation --rfsim \
-     --uicc0.imsi 001010000000001
-   ```
-
-4. **Verify Connectivity**
-
-   ```bash
-   ping 192.168.70.135 -I oaitun_ue1
-   ```
-
-## Healthcare Data Flow Simulation
-
-1. **Wearable script** on UE VM sends UDP data:
-   ```bash
-   while true; do echo "HeartRate:$((60 + RANDOM % 40))" | nc -u 192.168.70.135 5000; sleep 5; done
-   ```
-2. **Server** on Core VM listens:
-   ```bash
-   nc -klu 5000
-   ```
-3. **Observe** incoming metrics and verify end-to-end delivery.
-4. **Scale** by launching multiple UE instances with distinct IMSIs.
-5. **QoS & Slicing**: Experiment with SST/QFI parameters for critical data flows.
-
-## Network Testing & Monitoring
-
-- **Latency & Packet Capture**: Use `wireshark` on `oaitun_ue1` or SCTP port 38412 to measure RTT and inspect signaling.
-- **Ping & Throughput**: `ping`, `iperf3` between UE and server.
-- **Logs**: Monitor Core containers (`docker logs -f`) and gNB/UE consoles.
-- **Troubleshoot**: Validate IMSI/key, SCTP connectivity, firewall rules, use `tcpdump` as needed.
-
-## Conclusion
-
-You now have a virtual 5G SA network simulating a healthcare IoT scenario. This testbed can be extended to real healthcare applications, multi-cell handovers, advanced QoS, and network slicing experiments. For more details, see the official OAI documentation and recent research on 5G in healthcare.
+## 11. References
+- OAI Docker deployment: https://gitlab.eurecom.fr/oai/openairinterface5g/-/tree/develop/docker
+- 5G RF Simulator CI scripts: https://gitlab.eurecom.fr/oai/openairinterface5g/-/blob/develop/ci-scripts/yaml_files/5g_rfsimulator/README.md
