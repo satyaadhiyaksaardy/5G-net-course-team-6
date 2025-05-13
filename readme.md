@@ -11,8 +11,10 @@ This guide provides a comprehensive walkthrough to deploy, simulate, and evaluat
    - UE: Three nrUE containers simulating wearable devices.
    - DN: External Data Network container running the healthcare application server.
 
-Below is the logical topology and IP addressing for our Docker-based RF simulator deployment:
-![oai stack](/images/oai-stack.png)
+Below is the IP addressing for our Docker-based RF simulator deployment:
+
+<!-- ![oai stack](/images/oai-stack.png) -->
+
 - Private Subnet (192.168.71.128/26): Hosts UE, gNB, AMF, SMF, UPF—isolated traffic between RAN and Core.
 - Public Subnet (192.168.72.128/26): Hosts NRF and ext-dn, with ext-dn providing connectivity to the “internet” (SGI).
 - SGI Route: On ext-dn host, a route to UE data network 12.1.1.0/24 is added via the Core (192.168.72.134 interface).
@@ -30,13 +32,13 @@ All components run as Docker containers on a single host using OAI’s RF simula
 - **Server**: Health monitoring service receiving sensor data over the 5G data network.
 
 ## 3. Goals
-**1. Latency:** Measure end-to-end round‑trip latency; target < 20 ms for reliable real‑time monitoring.
-**2. Connectivity:** Verify UE registration, PDU session establishment, and stable packet exchange.
-**3. Throughput & Reliability:** Use iperf3 to validate throughput and jitter under a realistic UDP load.
+1. **Latency:** Measure end-to-end round‑trip latency; target < 20 ms for reliable real‑time monitoring.
+2. **Connectivity:** Verify UE registration, PDU session establishment, and stable packet exchange.
+3. **Throughput & Reliability:** Use iperf3 to validate throughput and jitter under a realistic UDP load.
 
 ## 4. Prerequisites
-**- Software:** Git, Docker Engine, Docker Compose V2, wireshark/tshark, iperf3, netcat
-**- Network:** Docker bridge (default) or host networking for cross-container setups
+- **Software:** Git, Docker Engine, Docker Compose V2, wireshark/tshark, iperf3, netcat
+- **Network:** Docker bridge (default) or host networking for cross-container setups
 
 ## 5. Environment Setup
 
@@ -152,7 +154,7 @@ _Server-side iperf3 report showing jitter and packet counts._
 _Client-side iperf3 output showing throughput over each interval._
 **Analysis**: Throughput is close to the offered load (1 Mbps), with negligible packet loss and sub-millisecond jitter, demonstrating stable uplink performance for a wearable IoT sensor.
 
-<!-- ### 9.1 Control-plane Latency (ICMP Ping) Control-plane Latency (ICMP Ping)
+### 9.1 Control-plane Latency (ICMP Ping) Control-plane Latency (ICMP Ping)
 We measure ICMP RTT from an nrUE container to the external data network over the 5G control-plane tunnel:
 ```bash
 # From inside an UE container:
@@ -162,7 +164,7 @@ rtt min/avg/max/mdev = 4.350/5.100/6.050/0.650 ms
 ```
 ![Server Side](images/ping.png)
 Ping output after initial registration—values reflect subsequent RTT once the PDU session is established.
-Analysis: After the first packet incurs registration and ARP overhead, the following control-plane RTTs stabilize around 5 ms, well within the < 10 ms target of 5G for ultra-reliable, low-latency applications. -->
+Analysis: After the first packet incurs registration and ARP overhead, the following control-plane RTTs stabilize around 5 ms, well within the < 10 ms target of 5G for ultra-reliable, low-latency applications.
 
 ## 10. Cleanup
 ```bash
